@@ -29,10 +29,6 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/socket.h>
-#include <bits/socket.h>
-#include <netdb.h>
-#include <ifaddrs.h>
-#include <net/if.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/select.h>
@@ -53,7 +49,6 @@
 #include <string>
 #include <stdio.h>
 #include <pwd.h>
-#include <type_traits>
 #include "../services/comm.h"
 #include "../services/logging.h"
 #include "../services/job.h"
@@ -62,7 +57,6 @@
 
 #include "compileserver.h"
 #include "job.h"
-
 
 #define DEBUG_SCHEDULER 0
 
@@ -1693,121 +1687,12 @@ static bool handle_activity(CompileServer *cs)
     return ret;
 }
 
-static size_t sockaddr_len(struct sockaddr_storage *addr)
-{
-    if (addr->ss_family == AF_INET)
-        return sizeof(sockaddr_in);
-
-    if (addr->ss_family == AF_INET6)
-        return sizeof(sockaddr_in6);
-
-    return -1;
-}
-
-static size_t sockaddr_len(struct sockaddr *addr)
-{
-    if (addr->sa_family == AF_INET)
-        return sizeof(sockaddr_in);
-
-    if (addr->sa_family == AF_INET6)
-        return sizeof(sockaddr_in6);
-
-    return -1;
-}
-
-static int get_dev_addr(const char *dev_name, struct sockaddr_storage *addr_out)
-{
-    struct ifaddrs *ifaddr = nullptr, *ifa = nullptr;
-
-    if (addr_out == nullptr) {
-        log_error() << "Null addr_out argument to get_dev_addr" << endl;
-        return -1;
-    }
-
-    if (getifaddrs(&ifaddr) == -1) {
-        log_perror("failed to get device list");
-        return -1;
-    }
-
-    char buff[sizeof(struct in6_addr)];
-
-    for (ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
-        // interface isn't up, keep looking.
-        if (!(ifa->ifa_flags & IFF_UP)) {
-            continue;
-        }
-
-        // no assigned address, keep looking.
-        if (!ifa->ifa_addr) {
-            continue;
-        }
-
-        // not an ip address, keep looking.
-        if (ifa->ifa_addr->sa_family != AF_INET && ifa->ifa_addr->sa_family != AF_INET6)
-        {
-            continue;
-        }
-
-        const char *p = inet_ntop(ifa->ifa_addr->sa_family, ifa->ifa_addr, buff, sizeof(buff));
-        if (!p) {
-            log_error() << "failed to convert interface raw " << dev_name << " address to string: " << strerror(errno) << endl;
-            return -1;
-        }
-
-        log_info() << "Found address for dev " << dev_name << " : " << buff << endl;
-        memcpy(addr_out, &ifa->ifa_addr, sockaddr_len(ifa->ifa_addr));
-        return 0;
-    }
-
-    return -1;
-}
-
-template<typename T>
-struct sockaddr_family {
-    static int get(T *addr);
-
-};
-
-template<>
-int sockaddr_family<struct sockaddr_storage>::get(struct sockaddr_storage *addr)
-{
-    return addr->ss_family;
-}
-
-template<>
-int sockaddr_family<struct sockaddr>::get(struct sockaddr *addr)
-{
-    return addr->sa_family;
-}
-
-template<typename T>
-static int sockaddr_with_port(int port, T *addr, T *out)
-{
-    if(sockaddr_family<T>::get(addr) == AF_INET) {
-        struct sockaddr_in *cpy = (struct sockaddr_in *)out;
-        memcpy(cpy, addr, sizeof(*cpy));
-        cpy->sin_port = port;
-        return 0;
-    } else if(sockaddr_family<T>::get(addr) == AF_INET6) {
-        struct sockaddr_in6 *cpy = (struct sockaddr_in6 *)out;
-        memcpy(cpy, addr, sizeof(*cpy));
-        cpy->sin6_port = port;
-        return 0;
-    }
-
-    return -1;
-}
-
-static int open_broad_listener(int port, struct sockaddr_storage *bind_addr)
+static int open_broad_listener(int port)
 {
     int listen_fd;
-    struct sockaddr_storage real_addr;
+    struct sockaddr_in myaddr;
 
-    if (sockaddr_with_port(port, bind_addr, &real_addr) != 0) {
-        return -1;
-    }
-
-    if ((listen_fd = socket(real_addr.ss_family, SOCK_DGRAM, 0)) < 0) {
+    if ((listen_fd = socket(PF_INET, SOCK_DGRAM, 0)) < 0) {
         log_perror("socket()");
         return -1;
     }
@@ -1819,7 +1704,11 @@ static int open_broad_listener(int port, struct sockaddr_storage *bind_addr)
         return -1;
     }
 
-    if (bind(listen_fd, (struct sockaddr *)&real_addr, sockaddr_len(&real_addr)) < 0) {
+    myaddr.sin_family = AF_INET;
+    myaddr.sin_port = htons(port);
+    myaddr.sin_addr.s_addr = INADDR_ANY;
+
+    if (bind(listen_fd, (struct sockaddr *) &myaddr, sizeof(myaddr)) < 0) {
         log_perror("bind()");
         return -1;
     }
@@ -1827,16 +1716,12 @@ static int open_broad_listener(int port, struct sockaddr_storage *bind_addr)
     return listen_fd;
 }
 
-static int open_tcp_listener(int port, struct sockaddr_storage *bind_addr)
+static int open_tcp_listener(short port)
 {
     int fd;
-    struct sockaddr_storage real_addr;
+    struct sockaddr_in myaddr;
 
-    if (sockaddr_with_port(port, bind_addr, &real_addr) != 0) {
-        return -1;
-    }
-
-    if ((fd = socket(real_addr.ss_family, SOCK_STREAM, 0)) < 0) {
+    if ((fd = socket(PF_INET, SOCK_STREAM, 0)) < 0) {
         log_perror("socket()");
         return -1;
     }
@@ -1856,7 +1741,11 @@ static int open_tcp_listener(int port, struct sockaddr_storage *bind_addr)
         return -1;
     }
 
-    if (bind(fd, (struct sockaddr *)&real_addr, sockaddr_len(&real_addr)) < 0) {
+    myaddr.sin_family = AF_INET;
+    myaddr.sin_port = htons(port);
+    myaddr.sin_addr.s_addr = INADDR_ANY;
+
+    if (bind(fd, (struct sockaddr *) &myaddr, sizeof(myaddr)) < 0) {
         log_perror("bind()");
         return -1;
     }
@@ -1878,7 +1767,6 @@ static void usage(const char *reason = 0)
     cerr << "ICECREAM scheduler " VERSION "\n";
     cerr << "usage: icecc-scheduler [options] \n"
          << "Options:\n"
-         << "  -b, --bind <net-dev-name>\n"
          << "  -n, --netname <name>\n"
          << "  -p, --port <port>\n"
          << "  -h, --help\n"
@@ -1950,8 +1838,6 @@ int main(int argc, char *argv[])
 {
     int listen_fd, remote_fd, broad_fd, text_fd;
     struct sockaddr_in remote_addr;
-    struct sockaddr_storage bind_addr;
-    const char *bind_dev_str = NULL;
     socklen_t remote_len;
     const char *netname = "ICECREAM";
     bool detach = false;
@@ -1981,7 +1867,6 @@ int main(int argc, char *argv[])
     while (true) {
         int option_index = 0;
         static const struct option long_options[] = {
-            { "bind", 1, NULL, 'b' },
             { "netname", 1, NULL, 'n' },
             { "help", 0, NULL, 'h' },
             { "persistent-client-connection", 0, NULL, 'r' },
@@ -1992,7 +1877,7 @@ int main(int argc, char *argv[])
             { 0, 0, 0, 0 }
         };
 
-        const int c = getopt_long(argc, argv, "b:n:p:hl:vdru:", long_options, &option_index);
+        const int c = getopt_long(argc, argv, "n:p:hl:vdru:", long_options, &option_index);
 
         if (c == -1) {
             break;    // eoo
@@ -2022,13 +1907,6 @@ int main(int argc, char *argv[])
                 debug_level++;
             }
 
-            break;
-        case 'b':
-            if(optarg && *optarg) {
-                bind_dev_str = optarg;
-            } else {
-                usage("Error: -b/--bind requires argument");
-            }
             break;
         case 'n':
 
@@ -2127,35 +2005,19 @@ int main(int argc, char *argv[])
         }
     }
 
-    if(bind_dev_str) {
-        // got a network interface to bind to
-        int res = get_dev_addr(bind_dev_str, &bind_addr);
-        if (res != 0) {
-            log_error() << "failed to get address for interface " << bind_dev_str << endl;
-            exit(1);
-        }
-    } else {
-        // no network interface was requested, bind to ALL.
-        struct sockaddr_in *all_addr = (struct sockaddr_in *)&bind_addr;
-        memset(all_addr, 0, sizeof(*all_addr));
-
-        all_addr->sin_family = AF_INET;
-        all_addr->sin_addr.s_addr = INADDR_ANY;
-    }
-
-    listen_fd = open_tcp_listener(scheduler_port, &bind_addr);
+    listen_fd = open_tcp_listener(scheduler_port);
 
     if (listen_fd < 0) {
         return 1;
     }
 
-    text_fd = open_tcp_listener(scheduler_port + 1, &bind_addr);
+    text_fd = open_tcp_listener(scheduler_port + 1);
 
     if (text_fd < 0) {
         return 1;
     }
 
-    broad_fd = open_broad_listener(scheduler_port, &bind_addr);
+    broad_fd = open_broad_listener(scheduler_port);
 
     if (broad_fd < 0) {
         return 1;
