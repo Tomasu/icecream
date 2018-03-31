@@ -1284,6 +1284,17 @@ static int open_send_broadcast(int port, const char* buf, int size)
         return -1;
     }
 
+    struct sockaddr_in local_addr;
+    socklen_t local_addr_len = sizeof(local_addr);
+    int sockname_res = getsockname(ask_fd, (struct sockaddr*)&local_addr, &local_addr_len);
+    if (sockname_res != 0) {
+        log_perror("getsockname ask_fd");
+        if (-1 == close(ask_fd)) {
+            log_perror("close failed");
+        }
+        return -1;
+    }
+
     struct kde_ifaddrs *addrs;
 
     int ret = kde_getifaddrs(&addrs);
@@ -1313,6 +1324,21 @@ static int open_send_broadcast(int port, const char* buf, int size)
                 log_info() << "ignoring tunnels " << addr->ifa_name << endl;
                 continue;
             }
+
+            if (!(addr->ifa_flags & IFF_UP) || !(addr->ifa_flags & IFF_RUNNING)) {
+                log_info() << "ignoring DOWN " << addr->ifa_name << endl;
+                continue;
+            }
+
+
+//             sockaddr_in *in = (sockaddr_in *)addr->ifa_addr;
+//             sockaddr_in *mask = (sockaddr_in *)addr->ifa_netmask;
+//
+//             if (in->sin_addr.s_addr ) {
+//                 log_info() << "ignoring not self " << addr->ifa_name << endl;
+//                 log_info() << "sock: " << inet_ntoa(local_addr.sin_addr) << " if: " << inet_ntoa(in->sin_addr) << endl;
+//                 continue;
+//             }
         } else {
             if (ntohl(((struct sockaddr_in *) addr->ifa_addr)->sin_addr.s_addr) != 0x7f000001) {
                 trace() << "ignoring non-localhost " << addr->ifa_name << endl;
@@ -1329,6 +1355,11 @@ static int open_send_broadcast(int port, const char* buf, int size)
             remote_addr.sin_family = AF_INET;
             remote_addr.sin_port = htons(port);
             remote_addr.sin_addr = ((sockaddr_in *)addr->ifa_broadaddr)->sin_addr;
+
+//              if (bind(ask_fd, addr->ifa_addr, sizeof(*(addr->ifa_addr))) != 0) {
+//                  log_perror("open_send_broadcast bind");
+//                  continue;
+//              }
 
             if (sendto(ask_fd, buf, size, 0, (struct sockaddr *)&remote_addr,
                        sizeof(remote_addr)) != size) {

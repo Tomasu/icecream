@@ -1693,77 +1693,25 @@ static bool handle_activity(CompileServer *cs)
     return ret;
 }
 
-template<typename T>
-struct sockaddr_family {
-    static int get(T *addr);
-};
-
-template<>
-int sockaddr_family<struct sockaddr_storage>::get(struct sockaddr_storage *addr)
-{
-    return addr->ss_family;
-}
-
-template<>
-int sockaddr_family<struct sockaddr>::get(struct sockaddr *addr)
+static int sockaddr_family(struct sockaddr *addr)
 {
     return addr->sa_family;
 }
 
-template<typename T>
-struct sockaddr_cast {
-    static T *get(struct sockaddr *from);
-};
-
-template<>
-struct sockaddr_in *sockaddr_cast<struct sockaddr_in>::get(struct sockaddr *addr)
-{
-    return addr->sa_family == AF_INET ? (struct sockaddr_in *)addr : nullptr;
-}
-
-template<>
-struct sockaddr_in6 *sockaddr_cast<struct sockaddr_in6>::get(struct sockaddr *addr)
-{
-    return addr->sa_family == AF_INET6 ? (struct sockaddr_in6 *)addr : nullptr;
-}
-
-static size_t sockaddr_len(struct sockaddr_storage *addr)
-{
-    if (addr->ss_family == AF_INET)
-        return sizeof(sockaddr_in);
-
-    if (addr->ss_family == AF_INET6)
-        return sizeof(sockaddr_in6);
-
-    return -1;
-}
-
-static size_t sockaddr_len(struct sockaddr *addr)
+size_t sockaddr_len(struct sockaddr *addr)
 {
     if (addr->sa_family == AF_INET)
         return sizeof(sockaddr_in);
 
-    if (addr->sa_family == AF_INET6)
-        return sizeof(sockaddr_in6);
-
     return -1;
 }
 
-template<typename A>
-struct sockaddr_saddr {
-    static A get(struct sockaddr *addr);
-};
-
-template<>
-in_addr sockaddr_saddr<in_addr>::get(struct sockaddr* addr)
+size_t sockaddr_len(struct sockaddr_in *addr)
 {
-    return sockaddr_cast<sockaddr_in>::get(addr)->sin_addr;
-}
+    if (addr->sin_family == AF_INET)
+        return sizeof(sockaddr_in);
 
-template<>
-in6_addr sockaddr_saddr<in6_addr>::get(struct sockaddr* addr)
-{
-    return sockaddr_cast<sockaddr_in6>::get(addr)->sin6_addr;
+    return -1;
 }
 
 static bool addr_link_local(struct sockaddr *addr)
@@ -1771,9 +1719,6 @@ static bool addr_link_local(struct sockaddr *addr)
     if(addr->sa_family == AF_INET) {
         struct sockaddr_in *ai = (struct sockaddr_in *)addr;
         return (IN_CLASSA_NET & INADDR_LOOPBACK) == (IN_CLASSA_NET & ai->sin_addr.s_addr);
-    } else if(addr->sa_family == AF_INET6) {
-        struct sockaddr_in6 *ai = (struct sockaddr_in6 *)addr;
-        return IN6_IS_ADDR_LOOPBACK(&ai->sin6_addr) || IN6_IS_ADDR_LINKLOCAL(&ai->sin6_addr);
     }
 
     return true;
@@ -1784,15 +1729,12 @@ static void *sockaddr_addr(struct sockaddr *addr)
     if(addr->sa_family == AF_INET) {
         struct sockaddr_in *ai = (struct sockaddr_in *)addr;
         return &ai->sin_addr.s_addr;
-    } else if(addr->sa_family == AF_INET6) {
-        struct sockaddr_in6 *ai6 = (struct sockaddr_in6 *)addr;
-        return &ai6->sin6_addr;
     }
 
     return nullptr;
 }
 
-static int get_dev_addr(const char *dev_name, struct sockaddr_storage *addr_out)
+static int get_dev_addr(const char *dev_name, struct sockaddr_in *addr_out)
 {
     struct ifaddrs *ifaddr = nullptr, *ifa = nullptr;
 
@@ -1806,7 +1748,7 @@ static int get_dev_addr(const char *dev_name, struct sockaddr_storage *addr_out)
         return -1;
     }
 
-    char buff[INET6_ADDRSTRLEN];
+    char buff[INET_ADDRSTRLEN];
 
     log_info() << "Interface " << dev_name << endl;
 
@@ -1825,21 +1767,21 @@ static int get_dev_addr(const char *dev_name, struct sockaddr_storage *addr_out)
             continue;
         }
 
-        // not an ip address, keep looking.
-        if (ifa->ifa_addr->sa_family != AF_INET && ifa->ifa_addr->sa_family != AF_INET6)
+        // not an ipv4 address, keep looking.
+        if (ifa->ifa_addr->sa_family != AF_INET)
         {
             continue;
         }
 
-        const char *p = inet_ntop(ifa->ifa_addr->sa_family, sockaddr_addr(ifa->ifa_addr), buff, sizeof(buff));
-        if (!p) {
-            log_error() << "\tfailed to convert interface raw " << dev_name << " address to string: " << strerror(errno) << endl;
-            return -1;
+        // loopback device, we don't care about it.
+        if (ifa->ifa_flags & IFF_LOOPBACK) {
+            log_info() << "\tloopback" << endl;
+            continue;
         }
 
-        // loopback device, we don't care about it.
-        if (ifa->ifa_flags & IFF_LOOPBACK || addr_link_local(ifa->ifa_addr)) {
-            log_info() << "\tloopback" << endl;
+        // address is link local, we don't care about it
+        if (addr_link_local(ifa->ifa_addr)) {
+            log_info() << "\tlink-local" << endl;
             continue;
         }
 
@@ -1849,44 +1791,43 @@ static int get_dev_addr(const char *dev_name, struct sockaddr_storage *addr_out)
             continue;
         }
 
-        log_info() << "\taddress: " << p << endl;
-        memcpy(addr_out, &ifa->ifa_addr, sockaddr_len(ifa->ifa_addr));
+        const char *p = inet_ntop(sockaddr_family(ifa->ifa_addr), sockaddr_addr(ifa->ifa_addr), buff, sizeof(buff));
+        if (!p) {
+            log_error() << "\tfailed to convert interface raw " << dev_name << " address to string: " << strerror(errno) << endl;
+            return -1;
+        }
+
+        log_info() << "\taddress: " << p << " af: " << ifa->ifa_addr->sa_family << endl;
+        memcpy(addr_out, ifa->ifa_addr, sockaddr_len(ifa->ifa_addr));
         return 0;
     }
 
     return -1;
 }
 
-
-
-template<typename T>
-static int sockaddr_with_port(int port, T *addr, T *out)
+static int sockaddr_with_port(int port, struct sockaddr_in *addr, struct sockaddr_in *out)
 {
-    if(sockaddr_family<T>::get(addr) == AF_INET) {
-        struct sockaddr_in *cpy = (struct sockaddr_in *)out;
-        memcpy(cpy, addr, sizeof(*cpy));
-        cpy->sin_port = port;
+    if(addr->sin_family == AF_INET) {
+        memcpy(out, addr, sizeof(*out));
+        out->sin_port = port;
         return 0;
-    } else if(sockaddr_family<T>::get(addr) == AF_INET6) {
-        struct sockaddr_in6 *cpy = (struct sockaddr_in6 *)out;
-        memcpy(cpy, addr, sizeof(*cpy));
-        cpy->sin6_port = port;
-        return 0;
+    } else {
+        log_error() << "got sockaddr with family: " << addr->sin_family << endl;
     }
 
     return -1;
 }
 
-static int open_broad_listener(int port, struct sockaddr_storage *bind_addr)
+static int open_broad_listener(int port, struct sockaddr_in *bind_addr)
 {
     int listen_fd;
-    struct sockaddr_storage real_addr;
+    struct sockaddr_in real_addr;
 
     if (sockaddr_with_port(port, bind_addr, &real_addr) != 0) {
         return -1;
     }
 
-    if ((listen_fd = socket(real_addr.ss_family, SOCK_DGRAM, 0)) < 0) {
+    if ((listen_fd = socket(real_addr.sin_family, SOCK_DGRAM, 0)) < 0) {
         log_perror("socket()");
         return -1;
     }
@@ -1906,16 +1847,17 @@ static int open_broad_listener(int port, struct sockaddr_storage *bind_addr)
     return listen_fd;
 }
 
-static int open_tcp_listener(int port, struct sockaddr *bind_addr)
+static int open_tcp_listener(int port, struct sockaddr_in *bind_addr)
 {
     int fd;
     struct sockaddr_in real_addr;
 
     if (sockaddr_with_port(port, bind_addr, &real_addr) != 0) {
+        log_error() << "failed to get sockaddr with port..." << endl;
         return -1;
     }
 
-    if ((fd = socket(real_addr.ss_family, SOCK_STREAM, 0)) < 0) {
+    if ((fd = socket(real_addr.sin_family, SOCK_STREAM, 0)) < 0) {
         log_perror("socket()");
         return -1;
     }
@@ -2029,7 +1971,7 @@ int main(int argc, char *argv[])
 {
     int listen_fd, remote_fd, broad_fd, text_fd;
     struct sockaddr_in remote_addr;
-    struct sockaddr_storage bind_addr;
+    struct sockaddr_in bind_addr;
     const char *bind_dev_str = NULL;
     socklen_t remote_len;
     const char *netname = "ICECREAM";
@@ -2206,6 +2148,8 @@ int main(int argc, char *argv[])
         }
     }
 
+    memset(&bind_addr, 0, sizeof(bind_addr));
+
     if(bind_dev_str) {
         // got a network interface to bind to
         int res = get_dev_addr(bind_dev_str, &bind_addr);
@@ -2215,28 +2159,28 @@ int main(int argc, char *argv[])
         }
     } else {
         // no network interface was requested, bind to ALL.
-        struct sockaddr_in *all_addr = (struct sockaddr_in *)&bind_addr;
-        memset(all_addr, 0, sizeof(*all_addr));
-
-        all_addr->sin_family = AF_UNSPEC;
-        all_addr->sin_addr.s_addr = INADDR_ANY;
+        bind_addr.sin_family = AF_INET;
+        bind_addr.sin_addr.s_addr = INADDR_ANY;
     }
 
     listen_fd = open_tcp_listener(scheduler_port, &bind_addr);
 
     if (listen_fd < 0) {
+        log_error() << "failed to open scheduler tcp port" << endl;
         return 1;
     }
 
     text_fd = open_tcp_listener(scheduler_port + 1, &bind_addr);
 
     if (text_fd < 0) {
+        log_error() << "failed to open scheduler tcp+1 port" << endl;
         return 1;
     }
 
     broad_fd = open_broad_listener(scheduler_port, &bind_addr);
 
     if (broad_fd < 0) {
+        log_error() << "failed to open scheduler udp port" << endl;
         return 1;
     }
 
